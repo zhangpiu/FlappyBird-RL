@@ -392,9 +392,7 @@ def mainGame(movementInfo):
         SCREEN.blit(episodes, (50, 430))
         SCREEN.blit(max_score, (52, 455))
         SCREEN.blit(states, (50, 480))
-        if RL_EPISODES % 100 == 0:
-            with open('Q.json', 'w') as fp:
-                json.dump(RL_Q_LEARNING['Q'], fp, indent=2)
+
         # playerw = IMAGES['player'][0].get_width()
         # playerh = IMAGES['player'][0].get_height()
         # pygame.draw.circle(SCREEN, (255, 0, 0), (int(delta_x + playerx + playerw), int(delta_y + playery + playerh)), RL_RESOLUTION, RL_RESOLUTION)
@@ -445,6 +443,9 @@ def showGameOverScreen(crashInfo):
             if playerRot > -90:
                 playerRot -= playerVelRot
 
+
+        with open('Q.json', 'w') as fp:
+            json.dump(RL_Q_LEARNING['Q'], fp, indent=2)
         return
 
         # draw sprites
