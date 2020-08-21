@@ -1,7 +1,7 @@
 from itertools import cycle
 import random
 import sys
-
+import json
 import pygame
 from pygame.locals import *
 
@@ -13,6 +13,16 @@ PIPEGAPSIZE  = 100 # gap between upper and lower part of pipe
 BASEY        = SCREENHEIGHT * 0.79
 # image, sound and hitmask  dicts
 IMAGES, SOUNDS, HITMASKS = {}, {}, {}
+RL_Q_LEARNING = dict(Q=dict(), A=None, S=None)
+RL_ALPHA = 0.6
+RL_GAMMA = 0.8
+RL_EPSILON = 0
+RL_ALIVE_REWARD = 1
+RL_DEAD_REWARD = -100
+RL_RESOLUTION = 10
+RL_EPISODES = 0
+RL_MAX_SCORE = 0
+
 
 # list of all possible players (tuple of 3 positions of flap)
 PLAYERS_LIST = (
@@ -58,6 +68,7 @@ except NameError:
 def main():
     global SCREEN, FPSCLOCK
     pygame.init()
+    pygame.font.init()
     FPSCLOCK = pygame.time.Clock()
     SCREEN = pygame.display.set_mode((SCREENWIDTH, SCREENHEIGHT))
     pygame.display.set_caption('Flappy Bird')
@@ -132,6 +143,8 @@ def main():
         movementInfo = showWelcomeAnimation()
         crashInfo = mainGame(movementInfo)
         showGameOverScreen(crashInfo)
+        global RL_EPISODES
+        RL_EPISODES += 1
 
 
 def showWelcomeAnimation():
@@ -186,8 +199,33 @@ def showWelcomeAnimation():
         pygame.display.update()
         FPSCLOCK.tick(FPS)
 
+        return {
+            'playery': playery + playerShmVals['val'],
+            'basex': basex,
+            'playerIndexGen': playerIndexGen,
+        }
+
+
+def get_state(player, upperPipes, lowerPipes):
+    player['w'] = IMAGES['player'][0].get_width()
+    player['h'] = IMAGES['player'][0].get_height()
+    pipeW = IMAGES['pipe'][0].get_width()
+    pipeH = IMAGES['pipe'][0].get_height()
+    playerx = player['x'] + player['w']
+    playery = player['y'] + player['h']
+
+    for uPipe, lPipe in zip(upperPipes, lowerPipes):
+        pipe_x = lPipe['x'] + pipeW
+        pipe_y = uPipe['y'] + pipeH + PIPEGAPSIZE
+        if pipe_x - player['x'] > 0:
+            delta_x = int(pipe_x - playerx) // RL_RESOLUTION * RL_RESOLUTION
+            delta_y = int(pipe_y - playery) // RL_RESOLUTION * RL_RESOLUTION
+            return delta_x, delta_y
+    raise ValueError('Invalid environment')
+
 
 def mainGame(movementInfo):
+    font = pygame.font.SysFont("menlo", 24)
     score = playerIndex = loopIter = 0
     playerIndexGen = movementInfo['playerIndexGen']
     playerx, playery = int(SCREENWIDTH * 0.2), movementInfo['playery']
@@ -200,15 +238,16 @@ def mainGame(movementInfo):
     newPipe2 = getRandomPipe()
 
     # list of upper pipes
+    INIT_SHIFT = -SCREENWIDTH // 3
     upperPipes = [
-        {'x': SCREENWIDTH + 200, 'y': newPipe1[0]['y']},
-        {'x': SCREENWIDTH + 200 + (SCREENWIDTH / 2), 'y': newPipe2[0]['y']},
+        {'x': SCREENWIDTH + INIT_SHIFT, 'y': newPipe1[0]['y']},
+        {'x': SCREENWIDTH + INIT_SHIFT + (SCREENWIDTH / 3 * 2), 'y': newPipe2[0]['y']},
     ]
 
     # list of lowerpipe
     lowerPipes = [
-        {'x': SCREENWIDTH + 200, 'y': newPipe1[1]['y']},
-        {'x': SCREENWIDTH + 200 + (SCREENWIDTH / 2), 'y': newPipe2[1]['y']},
+        {'x': SCREENWIDTH + INIT_SHIFT, 'y': newPipe1[1]['y']},
+        {'x': SCREENWIDTH + INIT_SHIFT + (SCREENWIDTH / 3 * 2), 'y': newPipe2[1]['y']},
     ]
 
     pipeVelX = -4
@@ -239,6 +278,35 @@ def mainGame(movementInfo):
         # check for crash here
         crashTest = checkCrash({'x': playerx, 'y': playery, 'index': playerIndex},
                                upperPipes, lowerPipes)
+        delta_x, delta_y = get_state({'x': playerx, 'y': playery, 'index': playerIndex}, upperPipes, lowerPipes)
+        state = 'x={},y={}'.format(delta_x, delta_y)
+        global RL_Q_LEARNING
+        Q, S, A = RL_Q_LEARNING['Q'], RL_Q_LEARNING['S'], RL_Q_LEARNING['A']
+        if state not in Q:
+            Q[state] = [0, 0]  # stay, fly
+
+        # update
+        if not crashTest[0]:
+            if S is not None and A is not None:
+                Q[S][A] = (1 - RL_ALPHA) * Q[S][A] + RL_ALPHA * (RL_ALIVE_REWARD + RL_GAMMA * max(Q[state]))
+            RL_Q_LEARNING['S'] = state
+
+            if random.random() < RL_EPSILON:
+                action = 0 if random.random() < 0.5 else 1
+            else:
+                action = 0 if Q[state][0] >= Q[state][1] else 1
+            if action == 1:
+                if playery > -2 * IMAGES['player'][0].get_height():
+                    playerVelY = playerFlapAcc
+                    playerFlapped = True
+            RL_Q_LEARNING['A'] = action
+        else:
+            Q[S][A] = (1 - RL_ALPHA) * Q[S][A] + RL_ALPHA * (RL_DEAD_REWARD + RL_GAMMA * max(Q[state]))
+            print('Dead, size of states: {}, state={}, Q={}'.format(len(Q), S, Q[S]))
+
+            RL_Q_LEARNING['S'] = None
+            RL_Q_LEARNING['A'] = None
+
         if crashTest[0]:
             return {
                 'y': playery,
@@ -316,6 +384,21 @@ def mainGame(movementInfo):
         playerSurface = pygame.transform.rotate(IMAGES['player'][playerIndex], visibleRot)
         SCREEN.blit(playerSurface, (playerx, playery))
 
+        global RL_MAX_SCORE
+        RL_MAX_SCORE = max(RL_MAX_SCORE, score)
+        episodes = font.render('Episodes:  {}'.format(RL_EPISODES), True, (0, 0, 0))
+        max_score = font.render('Max score: {}'.format(RL_MAX_SCORE), True, (0, 0, 0))
+        states = font.render('States:    {}'.format(len(RL_Q_LEARNING['Q'])), True, (0, 0, 0))
+        SCREEN.blit(episodes, (50, 430))
+        SCREEN.blit(max_score, (52, 455))
+        SCREEN.blit(states, (50, 480))
+        if RL_EPISODES % 100 == 0:
+            with open('Q.json', 'w') as fp:
+                json.dump(RL_Q_LEARNING['Q'], fp, indent=2)
+        # playerw = IMAGES['player'][0].get_width()
+        # playerh = IMAGES['player'][0].get_height()
+        # pygame.draw.circle(SCREEN, (255, 0, 0), (int(delta_x + playerx + playerw), int(delta_y + playery + playerh)), RL_RESOLUTION, RL_RESOLUTION)
+
         pygame.display.update()
         FPSCLOCK.tick(FPS)
 
@@ -362,6 +445,8 @@ def showGameOverScreen(crashInfo):
             if playerRot > -90:
                 playerRot -= playerVelRot
 
+        return
+
         # draw sprites
         SCREEN.blit(IMAGES['background'], (0,0))
 
@@ -400,7 +485,7 @@ def getRandomPipe():
     gapY = random.randrange(0, int(BASEY * 0.6 - PIPEGAPSIZE))
     gapY += int(BASEY * 0.2)
     pipeHeight = IMAGES['pipe'][0].get_height()
-    pipeX = SCREENWIDTH + 10
+    pipeX = SCREENWIDTH + 100
 
     return [
         {'x': pipeX, 'y': gapY - pipeHeight},  # upper pipe
@@ -458,6 +543,7 @@ def checkCrash(player, upperPipes, lowerPipes):
 
     return [False, False]
 
+
 def pixelCollision(rect1, rect2, hitmask1, hitmask2):
     """Checks if two objects collide and not just their rects"""
     rect = rect1.clip(rect2)
@@ -482,6 +568,7 @@ def getHitmask(image):
         for y in xrange(image.get_height()):
             mask[x].append(bool(image.get_at((x,y))[3]))
     return mask
+
 
 if __name__ == '__main__':
     main()
